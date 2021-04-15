@@ -1,9 +1,8 @@
 import pandas as pd
 import numpy as np
-import ftfy
+# import ftfy
 import seaborn as sns
 import matplotlib.pyplot as plt
-from pandas_profiling import ProfileReport
 from IPython.display import Markdown
 from IPython.display import display
 from IPython.display import HTML
@@ -109,6 +108,24 @@ def fix_sodium(row):
     if is_empty(row["sodium_100g"]) and not is_empty(row["salt_100g"]):
         print("fix sodium")
         return 0.4*row["salt_100g"]
+    else:
+        return row["sodium_100g"]
+    
+def fix_carbs(row):
+    carbs = row["carbohydrates_100g"]
+    carb_types = ['sugars_100g','-sucrose_100g','-glucose_100g','-fructose_100g','-lactose_100g','-maltose_100g','-maltodextrins_100g','starch_100g','polyols_100g']
+    isna = pd.isnull(carbs)
+    if isna:
+        carbs = 0
+    for carb_type in carb_types:
+        if row[carb_type] > carbs:
+            carbs = row[carb_type]
+    if carbs > 0:
+        return carbs
+    elif isna:
+        return np.nan
+    return 0
+        
 
 def apply_copy_value_from_child(row, parent_col, child_cols):
     if is_empty(row[parent_col]):
@@ -119,16 +136,73 @@ def apply_copy_value_from_child(row, parent_col, child_cols):
                 return row[col]
     return row[parent_col]
 
-def is_french(row):
-    france_cols = ["origins", "origins_tags", "origins_tags", "manufacturing_places", "manufacturing_places_tags",
-                 "cities_tags", "purchase_places", "countries", "countries_tags", "countries_en"]
-    for col in france_cols:
-        value = str(row[col]).lower()
-        if "fr" in value or "france" in value:
-            return True  
-    # return "fr-" in str(row["emb_codes_tags"]).lower() or "fr " in str(row["emb_codes"]).lower() or empty_string(str(row["emb_codes"]))
-    return False
 
+def get_malus(value, score, ticks):
+    for i, tick in enumerate(ticks):
+        if value > tick:
+            score -= i - 10
+            break
+    return score
+
+def get_bonus(value, ticks):
+    for i, tick in enumerate(ticks):
+        if value > tick:
+            return 5-i
+
+def get_veg_bonus(value):
+    bonus = 0
+    if value > 80:
+        bonus = 5
+    elif value > 60:
+        bonus = 2
+    elif value > 40:
+        bonus = 1
+    return bonus
+
+def set_missing(row):
+    cols_required = ["energy_100g", "sugars_100g", "saturated-fat_100g", "sodium_100g", "fruits-vegetables-nuts_100g", "fiber_100g", "proteins_100g"]
+    missing_cols = []
+    for col in cols_required:
+        if empty_number(row[col]):
+            missing_cols.append(col)
+    if missing_cols:
+        return len(missing_cols)
+    else:
+        return np.nan
+    
+
+def calc_nutri(row):
+    malus = 0
+    bonus = 0
+    energy = row["energy_100g"]
+    sugar = row["sugars_100g"]
+    fat = row["saturated-fat_100g"]
+    sodium = row["sodium_100g"]
+    fruits = row["fruits-vegetables-nuts_100g"]
+    fiber = row["fiber_100g"]
+    protein = row["proteins_100g"]
+
+    energy_ticks = [3350, 3015, 2680, 2345, 2010, 1675, 1340, 1005, 670, 335]
+    sugar_ticks = [45, 40, 36, 31, 27, 22.5, 18, 13.5, 9, 4.5]
+    fat_ticks = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+    sodium_ticks = [0.900, 0.810, 0.720, 0.630, 0.540, 0.450, 0.360, 0.270, 0.180, 0.090]
+
+    malus = get_malus(energy, malus, energy_ticks)
+    malus = get_malus(sugar, malus, sugar_ticks)
+    malus = get_malus(fat, malus, fat_ticks)
+    malus = get_malus(sodium, malus, sodium_ticks)
+
+    fiber_ticks = [4.7, 3.7, 2.8, 1.9, 0.9]
+    prot_ticks = [8, 6.4, 4.8, 3.2, 1.6]
+
+    fiber_score = get_bonus(fiber, fiber_ticks) or 0
+    prot_score = get_bonus(protein, prot_ticks) or 0
+    veg_score = get_veg_bonus(row["fruits-vegetables-nuts_100g"]) or 0
+    
+    bonus = fiber_score + prot_score + veg_score
+    if malus >= 11 and veg_score != 5:
+        return malus - (fiber_score + veg_score)
+    return malus - bonus
 
 '''
 DATAFRAME CLASS
@@ -152,6 +226,14 @@ class Table(pd.DataFrame):
         print(f"Done. colonnes : {self.col_counts()}")
 
 
+        
+    def select(self, condition):
+        mask = self.eval(condition)
+        return self[mask]
+    
+    def reduce(self, condition):
+        self.eval(condition, inplace = True)
+    
     def delete_outliers(self, col, mask):
         before = mask.sum()
         self[mask] = np.nan
@@ -180,7 +262,7 @@ class Table(pd.DataFrame):
     def empty_to_nan(self):
         print("empty_to_nan")
         print("nan values : ", self.isna().sum().sum())
-        empty_values = (None, " ", '""', "''", "null", "none", "nan")
+        empty_values = (None, " ", '""', "''", "null", "none", "nan", "empty", "unknown")
         self.replace(empty_values, np.nan, inplace = True)
         print("nan values : ", self.isna().sum().sum())
 
@@ -190,7 +272,15 @@ class Table(pd.DataFrame):
         self.remove_duplicated_rows()
         self.remove_empty_cols()
 
-
+        
+    def remove_number(self):
+        print("suppression des chiffres dans les colonnes de texte...")
+        print("valeurs NaN : {}".format(self.isna().sum().sum()))
+        for col in self:
+            if self[col].dtype == "object":
+                self[col] = self[col].apply(lambda x: np.nan if str(x).isdigit() else x)
+        print("Done!")
+        print("valeurs NaN : {}".format(self.isna().sum().sum()))
 
     def clear_test(self):
         
@@ -203,18 +293,18 @@ class Table(pd.DataFrame):
         self["is_french"] = self.apply(is_french, axis = 1)
         print("is_french :", self["is_french"].sum())
         self.drop(self[self.is_french == False].index, inplace = True) 
-        # profile = ProfileReport(self, title='Pandas Profiling Report')
-        # profile.to_file("your_report.html")
-        # sns.boxplot(x=self["energy_100g"])
-        # plt.savefig('save_as_a_png.png')
-        # pd.DataFrame(self).to_csv("data_clean.csv", index = False)
 
 
+
+        
+
+        
+    
 
     def remove_empty_cols(self):
         empty_cols = []
         for col_name in self:
-            if self[col_name].size == self[col_name].apply(is_empty, args = (True, )).sum():
+            if self[col_name].size == self[col_name].apply(is_empty).sum():
                 empty_cols.append(col_name)
         if empty_cols:
             print(empty_cols)
@@ -226,7 +316,11 @@ class Table(pd.DataFrame):
             "categories_tags": ["categories", "categories_en"],
             "main_category": ["main_category_en"],
             "traces_tags": ["traces", "traces_en"],
-            "fruits-vegetables-nuts_100g": ["fruits-vegetables-nuts-estimate_100g"]
+            "fruits-vegetables-nuts_100g": ["fruits-vegetables-nuts-estimate_100g"],
+            "packaging_tags" : ["packaging"],
+            "brands_tags": ["brands"],
+            "labels_tags": ["labels", "labels_en"],
+            "additives_tags": ["additives", "additives_en"],
         }
         for parent_col, child_cols in col_relations.items():
             self[parent_col] = self.apply(apply_copy_value_from_child, args = (parent_col, child_cols,), axis = 1)
@@ -237,11 +331,6 @@ class Table(pd.DataFrame):
         for col in self:
             if self[col].dtype == "object":
                 self[col].apply(apply_fix_encoding)
-        # value = str(value)
-        # fix_value = ftfy.fix_text(value)
-        # if fix_value != value:
-        #     return fix_value
-        # return False
 
     def row_counts(self):
         return self.shape[0]
